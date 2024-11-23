@@ -1,7 +1,7 @@
 ---
 title: "Spatial causal inference in the presence of preferential sampling - Analysis on a pseudo-data set for reproducibility"
 output: 
-  github_document:
+  html_document:
     toc: true
     theme: united
 ---
