@@ -1,0 +1,182 @@
+---
+title: "Spatial causal inference in the presence of preferential sampling - Analysis on a pseudo-data set for reproducibility"
+output:
+  html_document:
+    toc: true
+    theme: united
+---
+
+## Load packages
+
+Load packages to run the model.
+
+```{r package}
+library(spatstat)
+library(fields)
+library(geoR)
+library(spam)
+```
+
+
+## Load relevant data and functions
+
+Load the coordinates of grid cells and relevant functions for the analysis. To check reproducibility, set the seed number to be $1234$.
+
+```{r load}
+load("grid_pts08.RData") # grid cell coordinates
+source("final_func.R")
+set.seed(1234)
+```
+
+## Generate pseudo-data
+
+Define the true values of the parameters.
+
+```{r values}
+alpha0 <- 7.0
+alpha1 <- 8.0
+beta <- c(-0.1, 9.0, 0.1, 1.0, -0.1, 0.6)
+
+eta0 <- -3.0
+eta1 <- -4.0
+delta <- c(-1.0, -1.0, -0.5, -1.0, 2.0, -0.1)
+
+phi0 <- 0.75
+phi1 <- -0.75
+
+gamma.u <- 0.5
+gamma.v <- 1.0
+```
+
+Generate the spatial processes $\mathcal{W}$ by Gaussian processes with Matérn covariance kernels.
+
+```{r process}
+G <- nrow(dom.pts)
+distMat <- rdist.earth(dom.pts, dom.pts, miles = FALSE)
+diag(distMat) <- 0
+
+U0.tilde <- t(chol(matern(distMat, 800, 0.5)))%*%rnorm(G, sd = sqrt(2.0))
+U1.tilde <- t(chol(matern(distMat, 800, 0.5)))%*%rnorm(G, sd = sqrt(1.0))
+V0.tilde <- t(chol(matern(distMat, 700, 0.5)))%*%rnorm(G, sd = sqrt(0.5))
+V1.tilde <- t(chol(matern(distMat, 700, 0.5)))%*%rnorm(G, sd = sqrt(3.0))
+
+U0 <- as.vector(U0.tilde)
+U1 <- as.vector(U1.tilde + gamma.u*U0.tilde)
+V0 <- as.vector(V0.tilde)
+V1 <- as.vector(V1.tilde + gamma.v*V0.tilde)
+```
+
+Generate spatial covariates and define intensities for point processes given the covariates and the spatial processes.
+
+```{r data}
+Z1 <- t(chol(matern(distMat, 300, 0.5)))%*%rnorm(G)
+Z2 <- t(chol(matern(distMat, 300, 0.5)))%*%rnorm(G)
+Z3 <- t(chol(matern(distMat, 300, 0.5)))%*%rnorm(G)
+Z4 <- t(chol(matern(distMat, 300, 0.5)))%*%rnorm(G)
+Z5 <- t(chol(matern(distMat, 300, 0.5)))%*%rnorm(G)
+Z6 <- t(chol(matern(distMat, 300, 0.5)))%*%rnorm(G)
+Z <- cbind(Z1, Z2, Z3, Z4, Z5, Z6)
+colnames(Z) <- paste("Variable", 1:6)
+
+lambda0 <- exp(Z %*% delta + V0 + phi0*U0 + rnorm(G, 0, 0.1))
+lambda1 <- exp(Z %*% delta + V1 + phi1*U1 + rnorm(G, 0, 0.1))
+```
+
+Generate Poisson random variables $N_{0,g}$ and $N_{1,g}$ per each grid cell for $g=1,\cdots,G$. 
+
+```{r}
+N0 <- rpois(n = G, lambda = exp(eta0)*lambda0) # sum(N0) = 1280
+N1 <- rpois(n = G, lambda = exp(eta1)*lambda1) # sum(N1) = 1920
+N <- N0 + N1
+```
+
+The realizations of the Poisson process in each grid cell represent the number of the survey sites in those cells. For simplicity, let us assume that the covariates of each survey site have the same values as those of the grid cell the site is located in. Define the treatment indicator $A(\mathbf{s})$ per each grid cell. Let the matrix $H$ denote the membership of the realized observations to the corresponding grid cells.
+
+```{r}
+X <- Z[rep(1:G, N),]
+
+Tr <- c()
+grid.ind <- c()
+for(g in 1:G){
+  Trg <- c(rep(0, N0[g]), rep(1, N1[g]))
+  Tr <- c(Tr, Trg)
+  grid.ind <- c(grid.ind, rep(g, N[g]))
+}
+
+H <- matrix(0, nrow = sum(N), ncol = G)
+for(i in 1:sum(N)){
+  H[i, grid.ind[i]] <- 1
+}
+H <- as(H, "sparseMatrix")
+```
+
+Let us generate the potential outcomes $Y_0(\mathbf{s})$ and $Y_1(\mathbf{s})$ using the site-level covariates and the spatial processes. Following the SUTVA assumption, generate the observed outcome as $Y(\mathbf{s})=Y_1(\mathbf{s})A(\mathbf{s})+Y(\mathbf{s})\left\{1-A(\mathbf{s})\right\}$.
+
+```{r outcome}
+Y0 <- alpha0 + X %*% beta + H%*%U0 + rnorm(sum(N), 0, sqrt(0.1))
+Y1 <- alpha1 + X %*% beta + H%*%U1 + rnorm(sum(N), 0, sqrt(0.1))
+Y <- as.vector(Y0*(1-Tr) + Y1*Tr)
+triangle <- alpha1 - alpha0 + mean(U1 - U0)
+```
+
+Under the given data generation process, the true value of the average causal effect $\triangle$ is `r triangle`.
+
+## Run the proposed model
+
+Run the proposed model assuming $\boldsymbol{\beta}_0=\boldsymbol{\beta}_1=\boldsymbol{\beta}$ and $\boldsymbol{\delta}_0=\boldsymbol{\delta}_1=\boldsymbol{\delta}$.
+
+```{r}
+burn <- 10000
+iters <- 50000
+model <- Mat.PO.share(Y = Y, 
+                      Tr = Tr, 
+                      N0 = N0, 
+                      N1 = N1, 
+                      domain = dom.pts, 
+                      X = X, 
+                      Z = Z, 
+                      H = H, 
+                      center.X = FALSE, 
+                      center.Z = FALSE, 
+                      iters = iters, 
+                      burn = burn, 
+                      rho_mn = log(300), 
+                      rho_sd = 1,
+                      verbose = TRUE, 
+                      update = 5000)
+```
+
+Now check whether the model converged or not. First, a visual inspection on the trace plot for the marginal posterior of $\triangle$ is done.
+
+```{r}
+plot(model$ATE[burn:iters], type = 'l') # Average causal effect
+abline(h = triangle, col = 'red')
+```
+
+The trace plots for the marginal posterior distributions of $\phi_0$ and $\phi_1$ are as follows.
+
+```{r}
+plot(model$samps[burn:iters, "phi0"], type = 'l') # phi0
+abline(h = phi0, col = 'red')
+```
+
+```{r}
+plot(model$samps[burn:iters, "phi1"], type = 'l') # phi1
+abline(h = phi1, col = 'red')
+```
+
+
+The mean posterior values of the coefficients corresponding to the covariates in the potential outcome models are as follows.
+
+```{r}
+colMeans(model$samps[burn:iters, paste("beta", colnames(X))])
+beta 
+```
+
+The mean posterior values of the coefficients corresponding to the covariates in the point process models are as follows.
+
+```{r}
+colMeans(model$samps[burn:iters, paste("delta", colnames(X))])
+delta
+```
+
