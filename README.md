@@ -23,7 +23,7 @@ The scripts are structured with dictionaries for the arguments of each function.
 
 **Simulation Study**
 
-Simulation study results rely on datasets that are hosted externally due to their size. The folder named _simulation_data_ in this repository contains a link to the corresponding Dropbox folder with the data. To evaluate bias, mean squared error (MSE), and 95% credible intervals, use _posterior_analysis.R_ in each folder.
+Simulation study results rely on datasets that are hosted externally due to their size. The folder _simulation_data_ in this repository contains _Simulation.md_, which includes a link to the corresponding Dropbox folder with the data. To evaluate bias, mean squared error (MSE), and 95% credible intervals, use _posterior_analysis.R_ in each folder.
 
 **Real Data Analysis**
 
