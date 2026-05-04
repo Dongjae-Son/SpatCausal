@@ -1,239 +1,38 @@
-expit <- function(x){1/(1+exp(-x))}
-logit <- function(x){log(x)-log(1-x)}
-logit.beta <- function(y, a = 9, b = 1){dbeta(expit(y), a, b)*expit(-y)*expit(y)} # pdf of logit(X) where X~Beta(a,b)
+# **************************************************************
+# *                                                            *
+# *         Propensity Score Adjustment Implementation         *
+# *                                                            *
+# **************************************************************
 
-corfx <- function(u, phi, kappa, matern=TRUE){
-  if(!matern) {kappa <- 0.5}
-  corr <- matern(u, phi, kappa)
-  corr[u==0] <- 1
-  return(corr)
-}
-
-ps_adj <- function(Y,
-                   Tr,
-                   domain,
-                   X,
-                   Z,
-                   H,
-                   N,
-                   Leap = 20,
-                   tau_L = 1/Leap,
-                   pri_sd_beta = 10, 
-                   a = 0.1, 
-                   b = 0.1,
-                   df = 5,
-                   spatial_glm = c("glm", "bart", "spatial"),
-                   euclidean = TRUE,
-                   iters = 20000, 
-                   burn = 5000, 
-                   update = 2000, 
-                   thin = 1,
-                   verbose = FALSE, 
-                   fix_rho = FALSE,
-                   fix_kappa.u = TRUE,
-                   rho_seq = seq(0.01, 0.2, by = 0.01), 
-                   kappa_mn = log(0.5), 
-                   kappa_sd = 1) {
-  library(Matrix)
-  library(MASS)
-  library(spam)
-  library(geoR)
-  library(dbarts)
-  library(splines2)
-  
-  tick <- proc.time()[3]
-  iters_thin <- (iters-burn)*thin
-  cov.names <- colnames(Z)
-  
-  # Bookkeeping
-  G <- nrow(domain)
-  p <- ncol(X)
-  q <- ncol(Z)
-  n <- nrow(X)
-  
-  
-  # distance matrix
-  if(euclidean) {
-    distMat <- as.matrix(dist(domain))
-  } else {
-    distMat <- fields::rdist.earth(domain, domain, miles = FALSE)
-  }
-  diag(distMat) <- 0
-  
-  
-  # Propensity score estimation
-  if(spatial_glm == "glm") {
-    glm_fit <- glm(Tr ~ ., data = as.data.frame(X), family = "binomial")
-    logit_ps <- predict(glm_fit, as.data.frame(X))
-    ps <- 1 / (1 + exp(-logit_ps))
-  } else if(spatial_glm == "bart") {
-    bart_fit <- dbarts::bart(x.train = X, y.train = Tr, x.test = Z, ndpost = 10000L, nskip = 2000L, verbose = FALSE)
-    ps_mat <- apply(bart_fit$yhat.train, 1, function(x){1/(1 + exp(-x))})
-    ps <- colMeans(t(ps_mat))
-  } else if(spatial_glm == "spatial") {
-    glm_fit <- glm(Tr ~ ., data = as.data.frame(X), family = "binomial")
-    n.samples <- 10000
-    burn.in <- 0.2*n.samples
-    spatial_ps <- spBayes::spGLM(formula = Tr ~ ., 
-                                 family = "binomial",
-                                 data = as.data.frame(cbind(Tr, X)), 
-                                 coords = as.matrix(H %*% as.matrix(domain)), 
-                                 knots = as.matrix(domain),
-                                 starting = list("beta" = coef(glm_fit), "phi" = mean(c(1/(rho+0.05), 1/(rho-0.05))), "sigma.sq" = 0.5, "w" = rnorm(G)),
-                                 tuning = list("beta" = rep(0.1, ncol(X)+1), "phi" = 0.1, "sigma.sq" = 0.1, "w" = rep(0.01^2, G)),
-                                 priors = list("beta.Normal" = list(rep(0, ncol(X)+1), rep(10, ncol(X)+1)), "phi.Unif" = c(1/(rho+0.05), 1/(rho-0.05)), "sigma.sq.IG" = c(0.1, 0.1)),
-                                 cov.model = "exponential",
-                                 n.samples = n.samples,
-                                 verbose = FALSE)
-    intercept <- spatial_ps$p.beta.theta.samples[burn.in:n.samples, 1]
-    Xbeta <- as.vector(X %*% colMeans(spatial_ps$p.beta.theta.samples[burn.in:n.samples, 2:3]))
-    w <- rowMeans(spatial_ps$p.w.samples[,burn.in:n.samples])
-    logit_ps <- intercept + Xbeta + w
-    ps <- 1/(1 + exp(-logit_ps))
-  }
-  dens <- density(ps, from = min(ps), to = max(ps))
-  cum_density <- cumsum(dens$y) / sum(dens$y)
-  inv_cdf <- approxfun(cum_density, dens$x)
-  probs <- seq(0, 1, length.out = df-1)[-c(1, df-1)]
-  knots <- inv_cdf(probs)
-  ps_bSp <- splines2::bSpline(ps, knots = knots)
-  
-  
-  # covariates
-  XA <- sweep(x = X, MARGIN = 1, STATS = Tr, FUN = "*")
-  X_tot <- cbind(rep(1,n), Tr, X, ps_bSp, XA)
-  
-  
-  # Initial value designation
-  lin.mod <- lm(Y~X_tot-1)
-  alpha0 <- as.vector(lin.mod$coefficients)[1]
-  alpha1 <- as.vector(lin.mod$coefficients)[2]
-  beta0 <- as.vector(lin.mod$coefficients)[3:(p+df+2)]
-  beta1 <- as.vector(lin.mod$coefficients)[(p+df+3):ncol(X_tot)]
-  reg_coef <- c(alpha0, alpha1, beta0, beta1)
-  sig2y <- sum(lin.mod$residuals^2)/sum(N)
-  
-  
-  # Precomputes Matern covariance with rho and kappa grids 
-  nr <- length(rho_seq)
-  kappa.u <- 0.5
-  CorU.grid <- array(0, c(G, G, nr))
-  InvCorU.grid <- array(0, c(G, G, nr))
-  for(r in 1:nr){
-    CorU.grid[,,r] <- corfx(distMat, rho_seq[r], kappa.u)
-    InvCorU.grid[,,r] <- chol2inv(chol(CorU.grid[,,r]))
-  }
-  rho_u_ind <- ifelse(is.numeric(fix_rho), which(rho_seq == fix_rho), ceiling((1+nr)/2))
-  rho.u <- rho_seq[rho_u_ind]
-  InvCorU <- InvCorU.grid[,,rho_u_ind]
-  sig2u <- 1
-  u <- rnorm(G)
-  
-  
-  # Keep track of stuff
-  varnames <- c("alpha0", paste("beta0", c(cov.names, colnames(ps_bSp))), "alpha1", paste("beta1", cov.names), "rho.u", "sig2u", "kappa.u", "sig2y")
-  keepers <- matrix(NA, iters, length(varnames))
-  colnames(keepers) <- varnames
-  
-  ATE_vec <- rep(NA, iters)
-  u_mn <- v_mn <- 0
-  u_var <- v_var <- 0
-  
-  
-  # RW Metropolis setup
-  acc <- rep(0, 2)
-  names(acc) <- c("rho.u", "kappa.u")
-  att <- acc
-  MH <- rep(0.1, 2)
-  
-  
-  for(iter in 1:(burn+iters_thin)) {
-    # alpha0 
-    u.vec <- as.vector(H%*%u)
-    Cov.y <- solve(t(X_tot)%*%X_tot/sig2y + diag(ncol(X_tot))/pri_sd_beta^2)
-    mean.y <- t(X_tot)%*%(Y-u.vec)/sig2y
-    reg_coef <- as.vector(rmvnorm(1, Cov.y%*%mean.y, Cov.y))
-    Xb <- as.vector(X_tot%*%reg_coef)
-    
-    alpha0 <- as.vector(reg_coef)[1]
-    alpha1 <- as.vector(reg_coef)[2]
-    beta0 <- as.vector(reg_coef)[3:(p+df+2)]
-    beta1 <- as.vector(reg_coef)[(p+df+3):ncol(X_tot)]
-    
-    # sig2y
-    QF.y <- sum((Y-Xb-u.vec)^2)
-    sig2y <- 1/rgamma(1, n/2+a, QF.y/2+b)
-    
-    
-    # u
-    mu_u <- as.vector(t(H)%*%(Y-Xb))/sig2y
-    Qu <- diag(N/sig2y)
-    QQ <- InvCorU/sig2u
-    C <- chol2inv(chol(Qu+QQ))
-    bb <- mu_u 
-    u <- C%*%bb + t(chol(C))%*%rnorm(G)
-    
-    
-    # Variance parameters for U
-    QF.u <- as.numeric(t(u)%*%InvCorU%*%u)
-    sig2u <- 1/rgamma(1, G/2 + a, QF.u/2 + b)
-    
-    
-    # rho.u
-    if(isFALSE(fix_rho)){
-      curlp <- sum(log(diag(t(chol(InvCorU))))) - t(u)%*%InvCorU%*%u/(2*sig2u)
-      
-      can_rho_u_ind <- rho_u_ind + 2*rbinom(1, 1, .5)-1
-      if(can_rho_u_ind > 0 & can_rho_u_ind <= nr){
-        canInvCorU <- InvCorU.grid[,,can_rho_u_ind]
-        canlp <- sum(log(diag(t(chol(canInvCorU))))) - t(u)%*%canInvCorU%*%u/(2*sig2u)
-        
-        if(runif(1) < exp(canlp-curlp)){
-          rho_u_ind <- can_rho_u_ind
-          rho.u <- rho_seq[rho_u_ind]
-          InvCorU <- canInvCorU
-        }
-      }
-    }
-    
-    
-    # Step size tuning
-    if(iter<burn){for(k in 1:length(MH)){if(att[k] > 50){
-      if(acc[k]/att[k] < 0.3){MH[k] <- MH[k]*0.8}
-      if(acc[k]/att[k] > 0.5){MH[k] <- MH[k]*1.2}
-      acc[k] <- att[k] <- 0
-    }}}
-    
-    
-    # KEEP TRACK OF STUFF
-    if(iter<burn) {
-      keepers[iter,] <- c(alpha0, beta0, alpha1, beta1, rho.u, sig2u, kappa.u, sig2y)
-      ATE_vec[iter] <- alpha1 + mean(Z%*%beta1)
-    } else {
-      if(iter%%thin == 0) {
-        keepers[burn+(iter-burn)/thin,] <- c(alpha0, beta0, alpha1, beta1, rho.u, sig2u, kappa.u, sig2y)
-        ATE_vec[burn+(iter-burn)/thin] <- alpha1 + mean(Z%*%beta1)
-        u_mn <- u_mn + u/(iters-burn)
-        u_var <- u_var + u^2/(iters-burn)
-      }
-    }
-    
-    if(isTRUE(verbose)) {
-      if(iter%%update == 0) {
-        cat(iter, "out of", burn+iters_thin, "number of iterations\n")
-      }
-    }
-  }
-  tock   <- proc.time()[3]
-  output <- list(samps = keepers,
-                 ATE = ATE_vec,
-                 uv_mn = u_mn,
-                 uv_var = u_var-u_mn^2,
-                 acc_rate = acc/att,
-                 time = (tock-tick)/60) # time is minute scale
-  return(output)
-}
-
+# Run the propensity score (PS) adjustment
+# Arguments:
+#   @Y             Observed outcome vector
+#   @Tr            Treatment status vector
+#   @domain        G by 2 matrix containing the centroids of the grid cells
+#   @X             N by p covariate matrix for observations
+#   @Z             G by p covariate matrix for grid cells 
+#   @H             N by G matrix with (i,g) entry 1 if ith location belongs to gth cell (i = 1,...,N and g = 1,...,G)
+#   @N0            The number of controlled locations in each cell of the discretized domain
+#   @N1            The number of treated locations in each cell of the discretized domain
+#   @Leap          The number of leap frog steps
+#   @tau_L         Leapfrog step size
+#   @pri_sd_phi    Prior sd for phi (preferential sampling parameter)
+#   @pri_sd_beta   Prior sd for beta (regression coefficients of the outcome)
+#   @a             Shape paramter of inverse gamma priors
+#   @b             Scale paramter of inverse gamma priors
+#   @df            The degrees of freedom of B-splines
+#   @spatial_glm   Methods to fit PS models (glm: generalized linear models, bart: binary Bayesian Regression Trees)
+#   @euclidean     Logical whether to use euclidean distances or pairwise great circle distances
+#   @iters         The number of MCMC samples after burn-in
+#   @burn          The number of burn-in samples
+#   @update        Print progress every this many iterations. Ignored if verbose = FALSE
+#   @thin          Keep every jth sample to reduce autocorrelation. Default: 1
+#   @verbose       Logical whether to print progress messages
+#   @fix_rho       Logical whether to update or fix rho, spatial dependence
+#   @fix_kappa.u   Logical whether to update or fix the spatial smoothness of U process
+#   @rho_seq       The sequence of candidate rhos for discretized Metropolis sampler
+#   @kappa_mn      Prior mean of the spatial smoothness parameters
+#   @kappa_sd      Prior sd of the spatial smoothness parameters
 ps_adj_gp <- function(Y,
                       Tr,
                       domain,
@@ -248,7 +47,7 @@ ps_adj_gp <- function(Y,
                       a = 0.1, 
                       b = 0.1,
                       df = 5,
-                      spatial_glm = c("glm", "bart", "spatial"),
+                      spatial_glm = c("glm", "bart"),
                       euclidean = TRUE,
                       iters = 20000, 
                       burn = 5000, 
@@ -306,32 +105,7 @@ ps_adj_gp <- function(Y,
     bart_fit <- dbarts::bart(x.train = X, y.train = Tr, x.test = Z, ndpost = 10000L, nskip = 2000L, verbose = FALSE)
     ps_mat <- apply(bart_fit$yhat.train, 1, function(x){1/(1 + exp(-x))})
     ps <- colMeans(t(ps_mat))
-  } else if(spatial_glm == "spatial") {
-    glm_fit <- glm(Tr ~ ., data = as.data.frame(X), family = "binomial")
-    n.samples <- 10000
-    burn.in <- 0.2*n.samples
-    spatial_ps <- spBayes::spGLM(formula = Tr ~ ., 
-                                 family = "binomial",
-                                 data = as.data.frame(cbind(Tr, X)), 
-                                 coords = as.matrix(H %*% as.matrix(domain)), 
-                                 knots = as.matrix(domain),
-                                 starting = list("beta" = coef(glm_fit), "phi" = mean(c(1/(rho+0.05), 1/(rho-0.05))), "sigma.sq" = 0.5, "w" = rnorm(G)),
-                                 tuning = list("beta" = rep(0.1, ncol(X)+1), "phi" = 0.1, "sigma.sq" = 0.1, "w" = rep(0.01^2, G)),
-                                 priors = list("beta.Normal" = list(rep(0, ncol(X)+1), rep(10, ncol(X)+1)), "phi.Unif" = c(1/(rho+0.05), 1/(rho-0.05)), "sigma.sq.IG" = c(0.1, 0.1)),
-                                 cov.model = "exponential",
-                                 n.samples = n.samples,
-                                 verbose = FALSE)
-    intercept <- mean(spatial_ps$p.beta.theta.samples[burn.in:n.samples, 1])
-    Xbeta <- as.vector(X %*% colMeans(spatial_ps$p.beta.theta.samples[burn.in:n.samples, 2:3]))
-    w <- rowMeans(spatial_ps$p.w.samples[,burn.in:n.samples])
-    logit_ps <- intercept + Xbeta + w
-    ps <- 1/(1 + exp(-logit_ps))
-  }
-  #dens <- density(ps, from = min(ps), to = max(ps))
-  #cum_density <- cumsum(dens$y) / sum(dens$y)
-  #inv_cdf <- approxfun(cum_density, dens$x)
-  #probs <- seq(0, 1, length.out = df-1)[-c(1, df-1)]
-  #knots <- inv_cdf(probs)
+  } 
   knots <- seq(from = min(ps), to = max(ps), length.out = df-1)[-c(1, df-1)]
   ps_bSp <- splines2::bSpline(ps, knots = knots)
   
@@ -567,6 +341,20 @@ ps_adj_gp <- function(Y,
   return(output)
 }
 
+
+# ------------------------------------------------------------------------------
+
+# Run a simulation with PSA-B and PSA-G models under various data generating processes (DGP)
+# Arguments:
+#   @nonGauss     logical whether to run models with non-Gaussian DGP
+#   @nonstat      logical whether to run models with non-stationary DGP
+#   @phi          Run models under stationary & Gaussian DGP with different degree of preferential sampling
+#   @lambda       Run models under stationary & Gaussian DGP with different number of obs per cell
+#   @rho          Run models under stationary & Gaussian DGP with different degree of spatial dependence
+#   @gamma.u      Run models under stationary & Gaussian DGP with different degree of LMC
+#   @df           Degrees of freedom of B-splines for propensity score adjustment
+#   @iters        The number of MCMC samples after burn-in
+#   @burn         The number of burn-in samples
 runModel_matern_ps_adj <- function (nonGauss = FALSE, nonstat = FALSE, phi = 2/3, lambda = 5, 
                                     rho = 0.1, iters = 120000, burn = 50000, df = 5) 
 {

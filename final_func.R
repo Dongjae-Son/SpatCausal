@@ -1,7 +1,26 @@
-expit <- function(x){1/(1+exp(-x))}
-logit <- function(x){log(x)-log(1-x)}
-logit.beta <- function(y, a = 9, b = 1){dbeta(expit(y), a, b)*expit(-y)*expit(y)} # pdf of logit(X) where X~Beta(a,b)
+# ***************************************************
+# *                                                 *
+# *        Proposed Method Implementation           *
+# *                                                 *
+# ***************************************************
 
+
+# Sigmoid function
+expit <- function(x){1/(1+exp(-x))} 
+
+# ------------------------------------------------------------------------------
+
+# Logit function
+logit <- function(x){log(x)-log(1-x)} 
+
+# ------------------------------------------------------------------------------
+
+# Matern Correlation function
+# Arguments:
+#   @u      A numeric vector of distances
+#   @phi    Spatial dependence parameter
+#   @kappa  Spatial smoothness parameter
+#   @maturn Logical. If false, this function returns an exponential correlation
 corfx <- function(u, phi, kappa, matern=TRUE){
   if(!matern) {kappa <- 0.5}
   corr <- matern(u, phi, kappa)
@@ -9,6 +28,15 @@ corfx <- function(u, phi, kappa, matern=TRUE){
   return(corr)
 }
 
+# ------------------------------------------------------------------------------
+
+# Metropolis-Hastings update for latent log-intensities in a Poisson log-normal model
+# Arguments:
+#   @oldz Current latent log-intensity values (length n vector)
+#   @y    Observed count data, assumed y | z ~ Poisson(exp(z))
+#   @mu   Prior mean of the Gaussian prior on z
+#   @sig  Prior SD of the Gaussian prior on z; also used as proposal scale
+#   @MH   Tuning multiplier for the random-walk proposal SD. Default: 1
 update.z <- function(oldz, y, mu, sig, MH=1){
   n <- length(oldz)
   canz <- rnorm(n,oldz,MH*sig)
@@ -18,6 +46,15 @@ update.z <- function(oldz, y, mu, sig, MH=1){
   return(out)
 }
 
+# ------------------------------------------------------------------------------
+
+# Hamiltonian Monte Carlo (HMC) update without preconditioning (From Neal (2011), "MCMC using Hamiltonian dynamics")
+# Arguments:
+#   @U           Negative log posterior as a function of the parameter of interest
+#   @grad_U      Gradient of the negative log posterior
+#   @epsilon     Leapfrog step size
+#   @L           The number of leapfrog steps
+#   @current_q   Current value of the parameter of interest
 HMC_naive = function (U, grad_U, epsilon = 0.01, L = 10, current_q)
 {
   dist = numeric(L+1)
@@ -71,6 +108,36 @@ HMC_naive = function (U, grad_U, epsilon = 0.01, L = 10, current_q)
   }
 }
 
+# ------------------------------------------------------------------------------
+
+# Run Shared Model using the model from Pati et. al (2011)
+# Arguments:
+#   @Y             Observed outcome vector
+#   @Tr            Treatment status vector
+#   @N             The number of locations in each cell of the discretized domain
+#   @domain        G by 2 matrix containing the centroids of the grid cells
+#   @X             N by p covariate matrix for observations
+#   @Z             G by p covariate matrix for grid cells 
+#   @H             N by G matrix with (i,g) entry 1 if ith location belongs to gth cell (i = 1,...,N and g = 1,...,G)
+#   @Leap          The number of leap frog steps
+#   @tau_L         Leapfrog step size
+#   @pri_sd_phi    Prior sd for phi (preferential sampling parameter)
+#   @pri_sd_beta   Prior sd for beta (regression coefficients of the outcome)
+#   @a             Shape paramter of inverse gamma priors
+#   @b             Scale paramter of inverse gamma priors
+#   @pri_sd_delta  Prior sd for delta (regression coefficients of the point process)
+#   @fix_rho       Logical whether to update or fix rho, spatial dependence
+#   @euclidean     Logical whether to use euclidean distances or pairwise great circle distances
+#   @iters         The number of MCMC samples after burn-in
+#   @burn          The number of burn-in samples
+#   @update        Print progress every this many iterations. Ignored if verbose = FALSE
+#   @thin          Keep every jth sample to reduce autocorrelation. Default: 1
+#   @verbose       Logical whether to print progress messages
+#   @fix_kappa.u   Logical whether to update or fix the spatial smoothness of U process
+#   @fix_kappa.v   Logical whether to update or fix the spatial smoothness of V process
+#   @rho_seq       The sequence of candidate rhos for discretized Metropolis sampler
+#   @kappa_mn      Prior mean of the spatial smoothness parameters
+#   @kappa_sd      Prior sd of the spatial smoothness parameters
 Pati <- function(Y, Tr, N, domain, X, Z, H, Leap = 20, tau_L = 1/Leap,
                  pri_sd_phi = 10, pri_sd_beta = 10, a = 0.1, b = 0.1, 
                  pri_sd_delta = 10, fix_rho = FALSE, euclidean = TRUE, 
@@ -389,6 +456,43 @@ Pati <- function(Y, Tr, N, domain, X, Z, H, Leap = 20, tau_L = 1/Leap,
   return(output)
 }
 
+# ------------------------------------------------------------------------------
+
+# Run the proposed model by Son et. al (2026)
+# Arguments:
+#   @Y             Observed outcome vector
+#   @Tr            Treatment status vector
+#   @N0            The number of controlled locations in each cell of the discretized domain
+#   @N1            The number of treated locations in each cell of the discretized domain
+#   @domain        G by 2 matrix containing the centroids of the grid cells
+#   @X             N by p covariate matrix for observations
+#   @Z             G by p covariate matrix for grid cells 
+#   @H             N by G matrix with (i,g) entry 1 if ith location belongs to gth cell (i = 1,...,N and g = 1,...,G)
+#   @L             The number of leap frog steps
+#   @tau           Leapfrog step size
+#   @center.X      Logical whether to center and scale X matrix
+#   @center.Z      Logical whether to center and scale Z matrix
+#   @update.gamma  Logical whether to update or fix gamma (LMC) parameters
+#   @pri_sd_phi    Prior sd for phi (preferential sampling parameter)
+#   @pri_sd_beta   Prior sd for beta (regression coefficients of the outcome)
+#   @a             Shape paramter of inverse gamma priors
+#   @b             Scale paramter of inverse gamma priors
+#   @pri_sd_delta  Prior sd for delta (regression coefficients of the point process)
+#   @pref_samp     Logical. If FALSE, the model reduces to a geostatistical model without point processes
+#   @fix_rho       Logical whether to update or fix rho, spatial dependence
+#   @iters         The number of MCMC samples after burn-in
+#   @burn          The number of burn-in samples
+#   @update        Print progress every this many iterations. Ignored if verbose = FALSE
+#   @thin          Keep every jth sample to reduce autocorrelation. Default: 1
+#   @verbose       Logical whether to print progress messages
+#   @HMC           Logical whether to use HMC or Metropolis samplers without adaptation
+#   @ppp           Logical whether to use all grid cells or not
+#   @euclidean     Logical whether to use euclidean distances or pairwise great circle distances
+#   @fix_kappa.u   Logical whether to update or fix the spatial smoothness of U process
+#   @fix_kappa.v   Logical whether to update or fix the spatial smoothness of V process
+#   @rho_seq       The sequence of candidate rhos for discretized Metropolis sampler
+#   @kappa_mn      Prior mean of the spatial smoothness parameters
+#   @kappa_sd      Prior sd of the spatial smoothness parameters
 Mat.PO.RE <-  function(Y, Tr, N0, N1, domain, X, Z, H, L = 20, tau = rep(1/L, 2),
                        center.X = FALSE, center.Z = FALSE, update.gamma = TRUE,
                        pri_sd_phi = 10, pri_sd_beta = 10, a = 0.1, b = 0.1, 
@@ -994,7 +1098,43 @@ Mat.PO.RE <-  function(Y, Tr, N0, N1, domain, X, Z, H, L = 20, tau = rep(1/L, 2)
   return(output)
 }
 
+# ------------------------------------------------------------------------------
 
+# Run the proposed model with fixing beta0 = beta1 = beta by Son et. al (2026)
+# Arguments:
+#   @Y             Observed outcome vector
+#   @Tr            Treatment status vector
+#   @N0            The number of controlled locations in each cell of the discretized domain
+#   @N1            The number of treated locations in each cell of the discretized domain
+#   @domain        G by 2 matrix containing the centroids of the grid cells
+#   @X             N by p covariate matrix for observations
+#   @Z             G by p covariate matrix for grid cells 
+#   @H             N by G matrix with (i,g) entry 1 if ith location belongs to gth cell (i = 1,...,N and g = 1,...,G)
+#   @L             The number of leap frog steps
+#   @tau           Leapfrog step size
+#   @center.X      Logical whether to center and scale X matrix
+#   @center.Z      Logical whether to center and scale Z matrix
+#   @update.gamma  Logical whether to update or fix gamma (LMC) parameters
+#   @pri_sd_phi    Prior sd for phi (preferential sampling parameter)
+#   @pri_sd_beta   Prior sd for beta (regression coefficients of the outcome)
+#   @a             Shape paramter of inverse gamma priors
+#   @b             Scale paramter of inverse gamma priors
+#   @pri_sd_delta  Prior sd for delta (regression coefficients of the point process)
+#   @pref_samp     Logical. If FALSE, the model reduces to a geostatistical model without point processes
+#   @fix_rho       Logical whether to update or fix rho, spatial dependence
+#   @iters         The number of MCMC samples after burn-in
+#   @burn          The number of burn-in samples
+#   @update        Print progress every this many iterations. Ignored if verbose = FALSE
+#   @thin          Keep every jth sample to reduce autocorrelation. Default: 1
+#   @verbose       Logical whether to print progress messages
+#   @HMC           Logical whether to use HMC or Metropolis samplers without adaptation
+#   @ppp           Logical whether to use all grid cells or not
+#   @euclidean     Logical whether to use euclidean distances or pairwise great circle distances
+#   @fix_kappa.u   Logical whether to update or fix the spatial smoothness of U process
+#   @fix_kappa.v   Logical whether to update or fix the spatial smoothness of V process
+#   @rho_seq       The sequence of candidate rhos for discretized Metropolis sampler
+#   @kappa_mn      Prior mean of the spatial smoothness parameters
+#   @kappa_sd      Prior sd of the spatial smoothness parameters
 Mat.PO.share <-  function(Y, Tr, N0, N1, domain, X, Z, H, L = 20, tau = rep(1/L, 2),
                           center.X = TRUE, center.Z = TRUE, update.gamma = TRUE,
                           pri_sd_phi = 10, pri_sd_beta = 10, a = 0.1, b = 0.1, 
@@ -1612,7 +1752,19 @@ Mat.PO.share <-  function(Y, Tr, N0, N1, domain, X, Z, H, L = 20, tau = rep(1/L,
   return(output)
 }
 
+# ------------------------------------------------------------------------------
 
+# Run a simulation with Naive, Shared, Full, PSA-B, PSA-G models under various data generating processes (DGP)
+# Arguments:
+#   @nonGauss     logical whether to run models with non-Gaussian DGP
+#   @nonstat      logical whether to run models with non-stationary DGP
+#   @phi          Run models under stationary & Gaussian DGP with different degree of preferential sampling
+#   @lambda       Run models under stationary & Gaussian DGP with different number of obs per cell
+#   @rho          Run models under stationary & Gaussian DGP with different degree of spatial dependence
+#   @gamma.u      Run models under stationary & Gaussian DGP with different degree of LMC
+#   @df           Degrees of freedom of B-splines for propensity score adjustment
+#   @iters        The number of MCMC samples after burn-in
+#   @burn         The number of burn-in samples
 runModel_matern <- function (nonGauss = FALSE, nonstat = FALSE, phi = 2/3, lambda = 5, 
                              rho = 0.1, gamma.u = -0.5, df = 5, iters = 120000, burn = 50000) 
 {
