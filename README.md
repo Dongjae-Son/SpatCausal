@@ -15,9 +15,9 @@ The repository is organized to support both simulation studies and real data ana
 
 The models used in the paper can be run using the following R scripts:
 
-	•	_final_func.R_ — implements the proposed (referred to as "Full" in the paper) model along with "Naive" and "Shared"
+	•	final_func.R — implements the proposed (referred to as "Full" in the paper) model along with "Naive" and "Shared"
 	
-	•	_ps_adj.R_ — implements the propensity score adjustment referred to as "PSA-B" and "PSA-G" in the paper
+	•	ps_adj.R — implements the propensity score adjustment referred to as "PSA-B" and "PSA-G" in the paper
 
 The scripts are structured with dictionaries for the arguments of each function.
 
@@ -25,7 +25,7 @@ The scripts are structured with dictionaries for the arguments of each function.
 
 Simulation study results rely on datasets that are hosted externally due to their size.
 
-	•	The folder named _simulation_data_ in this repository contains a link to the corresponding Dropbox folder with the data. To evaluate bias, mean squared error (MSE), and 95% credible intervals, use _posterior_analysis.R_ in each folder.
+	•	The folder named simulation_data in this repository contains a link to the corresponding Dropbox folder with the data. To evaluate bias, mean squared error (MSE), and 95% credible intervals, use _posterior_analysis.R_ in each folder.
 
 **Real Data Analysis**
 
